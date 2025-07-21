@@ -1,0 +1,10 @@
+tensorflow==2.10
+keras
+keras_tuner
+numpy
+pandas
+toml
+dask
+dask_sql
+dask_expr
+pyarrow

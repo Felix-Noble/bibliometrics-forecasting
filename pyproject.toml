@@ -1,0 +1,26 @@
+[project]
+name = "AbstractTransformer"
+version = "0.1.0"
+description = "Analyse word embeddings over time "
+authors = [
+    {name="Felix Noble", email="felix.noble@live.co.uk"}
+    ]
+requires-python = "==3.10"
+
+dependencies = [
+"tensorflow==2.10",
+"keras",
+"keras_tuner",
+"numpy",
+"pandas",
+"toml",
+"dask",
+"dask_sql",
+"dask_expr",
+"pyarrow",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+

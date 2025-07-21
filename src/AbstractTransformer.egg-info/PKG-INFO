@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: AbstractTransformer
+Version: 0.1.0
+Summary: Analyse word embeddings over time 
+Author-email: Felix Noble <felix.noble@live.co.uk>
+Requires-Python: ==3.10
+Requires-Dist: tensorflow==2.10
+Requires-Dist: keras
+Requires-Dist: keras_tuner
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: toml
+Requires-Dist: dask
+Requires-Dist: dask_sql
+Requires-Dist: dask_expr
+Requires-Dist: pyarrow
