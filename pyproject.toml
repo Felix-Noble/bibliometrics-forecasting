@@ -5,7 +5,7 @@ description = "Analyse word embeddings over time "
 authors = [
     {name="Felix Noble", email="felix.noble@live.co.uk"}
     ]
-requires-python = "==3.10.18"
+requires-python = ">=3.10"
 
 dependencies = [
 "tensorflow==2.10",
