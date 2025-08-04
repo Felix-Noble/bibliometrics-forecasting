@@ -10,7 +10,13 @@ import dask.dataframe as dd
 from dask.distributed import Client, LocalCluster, progress
 import ast
 import logging
+
+import mlflow
+import keras
 import keras_tuner
+import keras.layers as k_layers
+import keras.regularizers as k_reg
+import tensorflow as tf
 import warnings 
 import gc
 # temp #
@@ -27,17 +33,77 @@ logger = logging.getLogger(Path(__file__).stem)
 def process_partitioned_df():
     pass
 
-def make_tuner(config):
+def create_id_ref_map(ddf):
+    
+    id_ref_map = ddf[["publication_date", "referenced_works_OpenAlex"]].explode("referenced_works_OpenAlex")
+    
+    id_ref_map = id_ref_map.reset_index()
+    id_ref_map = id_ref_map.dropna()
+    id_ref_map= id_ref_map.repartition(npartitions=64).persist()
+    progress(id_ref_map)
+    logger.info(f"ID-Ref map created | nrows = {len(id_ref_map)}")
+    # id_ref_map.to_parquet(
+    #     "./cache/exploded_ddf",
+    #     write_index=True,
+    #     overwrite=True,
+    #     schema={"id_OpenAlex": "large_string",
+    #             "publication_date":"timestamp[ns]",
+    #             "referenced_works_OpenAlex": "string",
+    #             "__null_dask_index__": "int64"}
+    # ) 
+    logger.info("Checking id membership")
+    
+    # TODO add save/load functions and universalise schema
+    # filter out id's that aren't in the main ddf index 
+    # id_ref_map = dd.read_parquet("./cache/exploded_ddf",
+    #                              schema={"id_OpenAlex": "large_string",
+    #                                     "publication_date":"timestamp[ns]",
+    #                                     "referenced_works_OpenAlex": "string",
+    #                                     "__null_dask_index__": "int64"})
+    id_ref_map = id_ref_map.merge(
+        ddf[[]], # Creates an empty DataFrame with just the index of ddf
+        left_on="referenced_works_OpenAlex",
+        right_index=True,
+        how="inner",
+        
+    ).persist()
+    progress(id_ref_map)
+    logger.info(f"Referenced papers not in database dropped | nrows = {len(id_ref_map)}")
+    # TODO build tool for commented before scaling 
+    # expl_ddf["publication_date"] = dd.to_datetime(expl_ddf["publication_date"])
+    # expl_ddf = expl_ddf.sort_values("publication_date").persist()
+    id_ref_map["referenced_works_OpenAlex1"] = id_ref_map["referenced_works_OpenAlex"].apply(lambda x : np.int64(x.replace("https://openalex.org/W", "")), 
+                                                                                                meta=("referenced_works_OpenAlex1","int64")).persist()
+    
+    logger.info("Saving id ref map")
+    id_ref_map = id_ref_map.repartition(npartitions=64).persist()
+    progress(id_ref_map)
+    id_ref_map.to_parquet(
+        "./cache/" / "id_ref_map",
+        write_index = True,
+        overwrite = True,
+        schema={"id_OpenAlex": "int64",
+                "publication_date":"timestamp[ns]",
+                "referenced_works_OpenAlex": "int64",
+                "__null_dask_index__": "int64"}
+    )
 
-    return tuner
+    logger.info("ID-ref map saved")
+
 def main():
-    model = RandomForestClassifier() # temp
+    
     setup_logger(logger, get_log_config())
     data_config = get_data_config()
     model_config = get_model_config()
     train_config = get_train_config()
-
-    keras_model = build_model(model_config)
+    
+    n_embeddings = data_config["Nembeddings"]
+    embedding_cols = [f"embedding_{x}" for x in range(n_embeddings)]
+    N_REF = 5
+    n_input = n_embeddings * N_REF 
+    n_output = 2
+    mlflow.set_experiment("Test Run") # TODO add each of hardcoded to config 
+    tf.random.set_seed(2025)
 
     start_year = train_config["start_year"]
     end_year = train_config["end_year"]
@@ -53,149 +119,206 @@ def main():
 
     previous_slice_end_year = start_year
 
+    # keras_model = define_model(model_config)
+    def build_model(hp):
+        l2_regularization = hp.Choice('l2_regularization', values=[0.01, 0.001, 0.0001])
+
+        inputs = k_layers.Input(shape=(n_input))
+        
+        x = k_layers.Reshape((N_REF, n_embeddings))(inputs)
+        for i in range(hp.Int("conv_layers", 1, 3, default=1)):
+            x = k_layers.Conv1D (
+                filters = hp.Int("filters_" + str(i), 8, 64, step=8, default=16),
+                kernel_size = hp.Int("kernel_size_" + str(i), 1149, 1915),
+                activation = "relu",
+                padding = "same",
+                kernel_regularizer=k_reg.l2(l2_regularization)
+
+            )(x)
+            x = k_layers.AveragePooling1D()(x)
+            x = k_layers.BatchNormalization()(x)
+            x = k_layers.ReLU()(x)
+        x = k_layers.Flatten()(x)
+        outputs = k_layers.Dense(n_output, activation="softmax")(x)
+
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        optimizer = hp.Choice("optimizer", ["adam"])
+
+        model.compile(
+            optimizer, loss="sparse_categorical_crossentropy", metrics=["accuracy"]
+        )
+        return model
+
+
+    # initialise tuner # 
+    tuner = keras_tuner.RandomSearch(
+        hypermodel=build_model,
+        objective="val_accuracy",
+        max_trials=3,
+        executions_per_trial=2,
+        overwrite=True,
+        directory="./cache/",
+        project_name=model_config["model_name"],
+    )
+
     client = Client(LocalCluster())
     logger.info(f"Dask client initialized: {client.dashboard_link}")
-    logger.info("Loading database")
 
+    logger.info("Loading database")
     data_base_loc = data_config["database_loc"] / data_config["journal"] / "parquet"
     logger.debug(f"loading from {data_base_loc}")
 
-    id_ref_map_loc = data_config["database_loc"] / data_config["journal"] / "id_ref_map"
-    ddf = dd.read_parquet(data_base_loc)
-    logger.debug(ddf.index.name)
-    # ddf = ddf.reset_index()
-    # ddf["referenced_works_OpenAlex"] = ddf["referenced_works_OpenAlex"].apply(ast.literal_eval, meta=("referenced_works_OpenAlex", "object"))
-    # id_ref_map = ddf[["id_OpenAlex", "publication_date", "referenced_works_OpenAlex"]].explode("referenced_works_OpenAlex")
-    id_ref_map = dd.read_parquet(id_ref_map_loc)
-    id_ref_map = id_ref_map.reset_index()
-    logger.debug(len(ddf))
-    ddf = ddf.dropna(subset="publication_date").persist()
-    logger.debug(len(ddf))
-    logger.debug("LEN AFTER DROP PUB DATE NA")
-    logger.debug(len(id_ref_map))
-    logger.debug(len(pd.unique(id_ref_map.index.compute())))
+    ddf = dd.read_parquet(data_base_loc,
+                          columns=["publication_date", "citation_count_OpenAlex", "referenced_works_count_OpenAlex", "higher_than_median_year"] + embedding_cols,
+                          dtypes={"id_OpenAlex": "int64"})
     
-    # ddf = ddf.set_index("id_OpenAlex")
-    # id_ref_map = dd.read_parquet(id_ref_map_loc)
-    logger.debug(f"Database index: {ddf.index.name}")
-    logger.debug(f"ID-ref map index: {id_ref_map.index.name}")
-    ddf = ddf.dropna(subset = ["referenced_works_count_OpenAlex"])
-    # ddf = ddf[ddf["referenced_works_count_OpenAlex"] >= 5]
-    # ddf = ddf.repartition(npartitions = 64)
-    logger.debug(f"Sataset (future) cols = {ddf.columns}")
-    # ddf['publication_date'] = dd.to_datetime(ddf['publication_date'])
+    id_ref_map_loc = data_config["database_loc"] / data_config["journal"] / "id_ref_map"
+    id_ref_map = dd.read_parquet(id_ref_map_loc,
+                                 dtypes={"id_OpenAlex": "int64",
+                                         "referenced_works_OpenAlex": "int64"})
 
+    if logger.level == logging.DEBUG:
+       
+
+        ddf.reset_index()[["id_OpenAlex"] + embedding_cols[:5]].compute().to_csv("./cache/ddf_index_test.csv")
+
+    # data safety checks #
+    pass
+
+    # data safety fixes #
+     
     # ddf["referenced_works_OpenAlex"] = ddf["referenced_works_OpenAlex"].apply(ast.literal_eval, meta=('referenced_works_OpenAlex', 'object'))
     logger.debug("ID-Ref Map")
     logger.debug(id_ref_map.compute())
 
     All_data = None    
-    # ddf = ddf.sort_values("publication_date").persist()
-    print(ddf.columns)
-    # logger.info(f"{available_ids.shape} rows in main ddf")
+   
     logger.info("Temporal slicing...")
-    # available_ids = ddf.index.persist()
     gc.collect()
-    embedding_cols = [f"embedding_{x}" for x in range(data_config["Nembeddings"])]
-    # embedding_lookup_df = ddf[embedding_cols]
-    
     for current_slice_end_year in range(first_slice_end_year, end_year, CV_delta):
     # for current_slice_end_year in pd.timedelta_range(first_slice_end_year, end_year):
         logger.info(f"Importing slice from temporal range: {previous_slice_end_year} {current_slice_end_year}")
         ## select range ##
         greater_than = pd.to_datetime(previous_slice_end_year, format="%Y")
         less_than = pd.to_datetime(current_slice_end_year, format="%Y")
-        slice_ddf = id_ref_map[(id_ref_map["publication_date"] >= greater_than) & (id_ref_map["publication_date"] <= less_than)]
-        # val_counts = slice_ddf["id_OpenAlex"].compute().value_counts()
-       
+        slice_id_ref = id_ref_map[(id_ref_map["publication_date"] >= greater_than) & (id_ref_map["publication_date"] <= less_than)]
+
+        if logger.level == logging.DEBUG:
+            slice_id_ref.compute().to_csv("./cache/slice_ddf.csv")
         # config (move to) #
         N_REFS = 5
         N_OUT = 1
         y_cols = ["higher_than_median_year"]
-
-        # drop ref lists less than N_REFS long
-        # val_counts = val_counts[val_counts >= N_REFS]
-        # logger.debug(f"VAL COUNTS {val_counts}")
+       
+        # id_counts = slice_id_ref.groupby("id_OpenAlex")["id_OpenAlex"].transform('count', meta=pd.Series(dtype='int64', name='id_counts')).persist()
+        id_counts = slice_id_ref.groupby("id_OpenAlex")["id_OpenAlex"].count()
+        id_counts = id_counts[id_counts >= N_REFS].persist()
+        id_counts = id_counts.to_frame(name="count")
         
+        slice_id_ref = dd.merge(slice_id_ref, id_counts, on="id_OpenAlex", how="inner").persist()
+        # val_counts = slice_id_ref["id_OpenAlex"].compute().value_counts()
+ 
         # Safety checks #
-        if len(slice_ddf) < 1:
+        if len(slice_id_ref) < 1:
             logger.info("No examples found in range, skipping")
             continue
 
-        # slice_ddf = slice_ddf.reset_index().set_index("referenced_works_OpenAlex")
-        # slice_ddf = slice_ddf.reset_index().set_index("id_OpenAlex")
-        # ids = [x for x in ids if x in ddf.index]
-        logger.debug(slice_ddf.columns)
-        # ddf["publication_date"] = dd.to_datetime(ddf["publication_date"])
-        ddf_renamed = ddf.rename(columns={"publication_date":"referenced_publication_date",
-                                          "referenced_works_count_OpenAlex": "ref_works_count_referenced_paper",
-                                          "citation_count_OpenAlex":"referenced_paper_citation_count",
+        ddf_renamed = ddf.rename(columns={"publication_date":"ref_work_publication_date",
+                                          "referenced_works_count_OpenAlex": "ref_work_referenced_works_count",
+                                          "citation_count_OpenAlex":"ref_work_citation_count",
                                           })
         
-        ungrouped_data = slice_ddf.merge(
-            ddf_renamed[["referenced_paper_citation_count"] + embedding_cols],
-            left_on="referenced_works_OpenAlex",
-            right_index=True,
-            how = "left"
-        ).persist()
+        logger.info("Merging slice ddf with referenced works data")
+        ungrouped_data = dd.merge(
+            ddf_renamed[["ref_work_citation_count", 
+                         "ref_work_referenced_works_count", 
+                         "ref_work_publication_date"] + embedding_cols],
+            slice_id_ref,
+            left_index=True,
+            # left_on="referenced_works_OpenAlex",
+            right_on = "referenced_works_OpenAlex",
+            # right_index=True,
+            how = "inner"
+        )
+        # ungrouped_data = ungrouped_data.persist()
+        ungrouped_data = ungrouped_data.repartition(npartitions=64).persist()
         progress(ungrouped_data)
-        #ungrouped_data = ungrouped_data.set_index("id_OpenAlex").persist()
-        def create_examples_X(df_partition):
-   
-            if df_partition.empty:
-                return pd.Series(dtype='object')
-            # df_partition = df_partition.reset_index()
-            print(df_partition[embedding_cols])
-            test = pd.DataFrame(df_partition[embedding_cols])
-            print(test)
-            print(df_partition[embedding_cols].to_frame())
-            print(len(test))
-            f = y
-            # df_partition = df_partition.sort_values(by="publication_date", kind = "stable", ascending=False)
-            # X_example = df_partition[embedding_cols].iloc[:N_REFS, :].values.reshape(-1,)
-            # X_example = pd.Series([X_example], index=[df_partition.index[0]], name="embeddings_grouped")
-            # return X_example
+        
+        if logger.level == logging.DEBUG:
+            # Inside your loop, after slice_ddf is created and its index is set
 
+            logger.debug(f"slice_ddf index name: {slice_id_ref.index.name}")
+            logger.debug(f"ddf index name: {ddf.index.name}")
+
+            # Compute unique indices to compare
+            slice_refs_in_range = slice_id_ref["referenced_works_OpenAlex"].unique().compute()
+            main_ddf_ids = ddf.index.compute()
+            logger.debug(f"Number of each id | slice refs {len(slice_refs_in_range)} | main ddf idx {len(main_ddf_ids)} ")
+                       
+            slice_refs_in_range.to_csv("./cache/slice_refs_in_range.csv")
+            # ddf.compute().to_csv("./cache/ddf2.csv")
+           
+            # Check how many referenced IDs are actually present in the main ddf
+            num_found = slice_refs_in_range.isin(main_ddf_ids).sum()
+            total_refs_in_range = len(slice_refs_in_range)
+
+            logger.info(f"Overlap check: {num_found} out of {total_refs_in_range} 'referenced_works_OpenAlex' IDs in slice_ddf's index are found in ddf's 'id_OpenAlex' index.")
+
+            if num_found == 0:
+                logger.warning("No overlap detected! This is why your embeddings are NaN.")
+            elif num_found < total_refs_in_range:
+                logger.warning(f"Partial overlap: {total_refs_in_range - num_found} 'referenced_works_OpenAlex' IDs are NOT found in ddf's index.")
+            
+            # ddf_renamed.compute().to_csv("./cache/ddf_renamed.csv")
+            ungrouped_data.compute().to_csv("./cache/ungrouped_data.csv")
+
+            if len(ungrouped_data) < 1 :
+                logger.error(ungrouped_data.compute())
+                client.close()
+                raise ValueError("no data matched in ungrouped data")
+
+        grouped_embedding_cols = [f"embedding_{x}" for x in range(n_embeddings * N_REFS)]
+        #ungrouped_data = ungrouped_data.set_index("id_OpenAlex").persist()
         def stack_and_flatten_embeddings(group_df):
             # group_df is a pandas DataFrame for a single group (e.g., all rows for id 'A')
             
-            # Select only the embedding columns
-            # print(group_df)
             embedding_data = group_df[embedding_cols]
-            n_embeddings = embedding_data.shape[1]
-            # TODO place in correct order 
-            embedding_data = np.concat([embedding_data.values.flatten()[:(N_REFS * n_embeddings)], ddf.loc[group_df.name, embedding_cols].values]).flatten()
-            # .values.flatten()
-            # embedding_data = group_df.loc[:N_REFS, embedding_cols].values.flatten()
-            # print(embedding_data)
-            # # Get the underlying NumPy array and flatten it to a 1D vector
-            # embedding_data = embedding_data.values.flatten()
-            # print(embedding_data)
-            # print(embedding_data.shape)
-            return embedding_data
+            
+            embedding_out = np.concatenate([[group_df.name], embedding_data.iloc[-N_REFS:, :].values.reshape(-1,)]).reshape(1,-1)
+            df = pd.DataFrame(embedding_out, columns = ["ID"] + grouped_embedding_cols)
+            return df
+        ungrouped_data = ungrouped_data.sort_values("ref_work_citation_count", ascending=False)
+        embeddings_grouped = ungrouped_data.groupby("id_OpenAlex").apply(stack_and_flatten_embeddings, meta=pd.DataFrame([], columns = ["ID"] + grouped_embedding_cols, dtype=np.float32))
+        # TODO move index assignment to dask groupby.apply operation
+       
+        embeddings_grouped = embeddings_grouped.reset_index().persist().drop(columns = "index").persist()
         
-        ungrouped_data = ungrouped_data.sort_values("referenced_paper_citation_count", ascending=False)
+        embeddings_grouped = embeddings_grouped.set_index("ID").persist()
 
-        embeddings_grouped = ungrouped_data.groupby("id_OpenAlex").apply(stack_and_flatten_embeddings, meta=("embeddings_grouped", "object")).persist()
-        embeddings_grouped = embeddings_grouped.to_frame(name="embeddings_grouped").repartition(npartitions=64).persist()
+        logger.info("Creating Temporal Embedding vectors")
+        embeddings_grouped = embeddings_grouped.repartition(npartitions=64).persist()
         progress(embeddings_grouped)
-        logger.debug(embeddings_grouped.head())      
-        logger.debug("Temporal Embedding vectors created")
-        logger.debug(embeddings_grouped.compute().shape)
-        
+        # logger.debug(embeddings_grouped.compute().iloc[:5, :])      
+        if logger.level == logging.DEBUG:
+            embeddings_grouped.compute().to_csv("./test/embeddings_grouped_test.csv")
+            
+        # embeddings_grouped = embeddings_grouped.set_index("id_OpenAlex")
+        logger.info("Merging embeddings with y data")
         All_slice_data = embeddings_grouped.merge(
-            ddf[y_cols],
-            how = "left"
-        ).persist()
+            ddf[y_cols + ["publication_date"]],
+            left_index=True,
+            right_index=True,
+            how = "inner"
 
-        logger.debug("Starting computations")
+        ).persist()
+        # All_slice_data = All_slice_data.repartition(npartitions=64)
         progress(All_slice_data)
-        logger.debug("Compute finished")
+
         All_slice_data = All_slice_data.compute()
-        logger.debug(All_slice_data.shape)
 
         # TODO check for memory availability here, if not start batch mode. TODO write batch train mode
-      
+
         if All_data is None:
             logger.debug("No X data found, creating X data from current slice")
             All_data = All_slice_data
@@ -204,27 +327,45 @@ def main():
         if All_data.shape[0] < 1:
             logger.info("Not enough examples, skipping")
             continue
-        logger.debug(f"BEFORE DUPLICATE REMOVAL | {All_data.shape}")
-        # All_data = All_data.drop_duplicates
-        # All_data = All_data.loc[~All_data.index.duplicated(keep="first")]
-        logger.debug(f"AFTER DUPLICATE REMOVAL | {All_data.shape}")
 
+        for col in embedding_cols:
+            # 'coerce' will turn any value that cannot be converted to a number into NaN
+            All_data[col] = pd.to_numeric(All_data[col], errors='coerce')
+
+        # Do the same for your target variable if it could contain non-numeric values
+        for col in y_cols:
+            All_data[col] = pd.to_numeric(All_data[col], errors='coerce')
+            
+        All_data = All_data.dropna()
+        All_data = All_data.sort_values("publication_date")
+        if logger.level == logging.DEBUG:
+            All_data.to_csv("./test/All_data.csv")
+        all_dates = All_data["publication_date"]
+        
         test_start = pd.to_datetime(f"{current_slice_end_year}", format="%Y") - test_size
         val_start = test_start - val_size
 
+        val_start_idx = all_dates.searchsorted(val_start)
+        test_start_idx = all_dates.searchsorted(test_start)
+
         logger.info(f"Train test split | {start_year} | {val_start} | {test_start} | {current_slice_end_year}")
 
-        train_ids = (All_data["publication_date"] >= start_year) & (All_data["publication_date"] < val_start)
-        val_ids = (All_data["publication_date"] >= val_start) & (All_data["publication_date"] < test_start)
-        test_ids = (All_data["publication_date"] >= test_start)
+        # train_ids = (All_data["publication_date"] >= start_year) & (All_data["publication_date"] < val_start)
+        # val_ids = (All_data["publication_date"] >= val_start) & (All_data["publication_date"] < test_start)
+        # test_ids = (All_data["publication_date"] >= test_start)
        
-        y_train = All_data.loc[train_ids, y_cols].values
-        y_val = All_data.loc[val_ids, y_cols].values
-        y_test = All_data.loc[test_ids, y_cols].values
+#       TODO add caching option for All data to load in pandas df in chunks, then access test train values from these views
+#       TODO add function to find index of y cols and embedding cols to improve speed here
+        y_col_idx = [All_data.columns.get_loc(x) for x in y_cols]
+        X_col_idx = [All_data.columns.get_loc(x) for x in [y for y in All_data.columns if y.startswith("embedding_")]]
+
+        y_train = All_data.iloc[:val_start_idx, y_col_idx].values.ravel().astype(np.float32)
+        y_val = All_data.iloc[val_start_idx:test_start_idx, y_col_idx].values.ravel().astype(np.float32)
+        y_test = All_data.iloc[test_start_idx:, y_col_idx].values.ravel().astype(np.float32)
             
-        X_train = All_data.loc[train_ids, "embeddings_grouped"].values
-        X_val = All_data.loc[val_ids, "embeddings_grouped"].values
-        X_test = All_data.loc[test_ids, "embeddings_grouped"].values
+        X_train = All_data.iloc[:val_start_idx, X_col_idx].values.astype(np.float32)
+        X_val = All_data.iloc[val_start_idx:test_start_idx, X_col_idx].values.astype(np.float32)
+        X_test = All_data.iloc[test_start_idx:, X_col_idx].values.astype(np.float32)
 
         logger.info("Data Shapes | total, train, val, test.")
         logger.info(f"All_data | {All_data.shape} ")
@@ -233,52 +374,67 @@ def main():
         logger.info(f"X test | {X_test.shape} | Y test| {y_test.shape}")
         logger.debug(All_data.head)
         logger.debug("Data sucessfully loaded")
-        logger.info(All_data)
+        logger.debug(All_data)
         previous_slice_end_year = current_slice_end_year
-        model = RandomForestClassifier()
 
-        peram_space = {"n_estimators": [int(x) for x in np.linspace(50,500,10)],
-               "max_depth": [int(x) for x in np.linspace(5,30,3)],
-               "min_samples_split": [int(x) for x in np.linspace(2,20,3)],
-               "min_samples_leaf": [int(x) for x in np.linspace(1,20,3)],
-               "max_features": ["sqrt", "log2"],
-               'bootstrap': [False]}
+
+        #mlflow_logger = keras_tuner.integration.mlflow.MLflowLogger(tuner)
         
-        GS = GridSearchCV(model, peram_space, cv=5, verbose=3, n_jobs=-1, scoring="balanced_accuracy").fit(X_val, y_val)
-        model.__dict__.update(GS.best_params_)
-        logger.info("Fitting")
-        model.fit(X_train, y_train)
-        logger.info("Evaluating")
-        preds = model.predict(X_test)
-        BA = balanced_accuracy_score(y_test, preds)
-        Prec = precision_score(y_test, preds)
-        roc_auc = roc_auc_score(y_test, preds)
+        tuner.search(X_train, y_train, epochs=15, validation_data=(X_val, y_val))
+        models = tuner.get_best_models(num_models=2)
+        best_model = models[0]
+        best_model.summary()
 
-        # initialise tuner # 
-        tuner = keras_tuner.RandomSearch(
-            hypermodel=keras_model,
-            objective="val_accuracy",
-            max_trials=3,
-            executions_per_trial=2,
-            overwrite=True,
-            directory="./cache/",
-            project_name=model_config["model_name"],
-        )
+        BA = None
+        Prec = None
+        roc_auc=None
 
-        tuner.search_space_summary()
+   # best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
 
-        # tuner.search(x_train, y_train, epochs=2, validation_data=(x_val, y_val))
-        # models = tuner.get_best_models(num_models=2)
-        # best_model = models[0]
-        # best_model.summary()
+   # # Start a new MLflow run to store the final, best model and its full history.
+   # with mlflow.start_run(run_name="Best_Model_Training"):
 
-        logger.info(f"""
-          Scores:
-            Accuracy: {BA}
-            Precision: {Prec}
-            ROC_AUC_OCO: {roc_auc}
-    """)
-        
+   #     # Log the best hyperparameters
+   #     mlflow.log_params(best_hps.values)
+   #     print(f"Logged Best Hyperparameters: {best_hps.values}")
+
+   #     # Build the model with the best hyperparameters
+   #     best_model = tuner.hypermodel.build(best_hps)
+
+   #     # Retrain the model on the full dataset to get final training history
+   #     history = best_model.fit(
+   #         x_train, y_train,
+   #         epochs=50, # Use the desired number of epochs for the final model
+   #         validation_split=0.2
+   #     )
+
+   #     # Log the full training history (metrics per epoch)
+   #     for epoch in range(len(history.history['loss'])):
+   #         metrics_to_log = {
+   #             'train_loss': history.history['loss'][epoch],
+   #             'train_accuracy': history.history['accuracy'][epoch],
+   #             'val_loss': history.history['val_loss'][epoch],
+   #             'val_accuracy': history.history['val_accuracy'][epoch]
+   #         }
+   #         mlflow.log_metrics(metrics_to_log, step=epoch)
+
+   #     print("Logged full training history for the best model.")
+
+   #     # Log the final model to MLflow
+   #     mlflow.keras.log_model(best_model, "best-model")
+   #     print("Best model has been logged to MLflow.")
+
+   #     # You can also log other artifacts, like a summary of the best model
+   #     summary_path = "best_model_summary.txt"
+   #     with open(summary_path, "w") as f:
+   #         best_model.summary(print_fn=lambda x: f.write(x + '\n'))
+   #     mlflow.log_artifact(summary_path)
+   #     print(f"Logged model summary to {summary_path}.")
+
+   # print("\nMLflow logging complete. Check the MLflow UI for results.")
+   # 
+   # tuner.search_space_summary()
+
 if __name__ == "__main__":
     setup_logger(logger)
 

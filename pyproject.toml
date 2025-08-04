@@ -5,13 +5,13 @@ description = "Analyse word embeddings over time "
 authors = [
     {name="Felix Noble", email="felix.noble@live.co.uk"}
     ]
-requires-python = "==3.10"
+requires-python = "==3.10.18"
 
 dependencies = [
 "tensorflow==2.10",
 "keras",
 "keras_tuner",
-"numpy",
+"numpy==1.26",
 "pandas",
 "toml",
 "dask",

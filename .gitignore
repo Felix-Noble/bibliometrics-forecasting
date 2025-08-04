@@ -3,4 +3,20 @@ logs/
 config/
 build/
 cache/
+test/
+
 txt.txt
+emergency_csv.csv
+__pycache__/
+ emergency_csv.csv/
+mlruns/
+src/__pycache__/tune.cpython-313.pyc
+src/keras_test.py
+src/load_test.py
+src/load_test2.py
+src/utils/index_parquet.py
+test_df.csv
+tuner_test.py
+tuner_test/
+
+
