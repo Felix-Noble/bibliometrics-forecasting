@@ -111,8 +111,6 @@ def _load_config(path: Path = None) -> dict:
 
 def get_data_config():
     cfg = _load_config()["data"]
-    for path in ["database_loc"]:
-        cfg[path] = Path(cfg[path])
     return cfg
 
 def get_model_config():

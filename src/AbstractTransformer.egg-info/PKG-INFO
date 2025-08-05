@@ -3,7 +3,7 @@ Name: AbstractTransformer
 Version: 0.1.0
 Summary: Analyse word embeddings over time 
 Author-email: Felix Noble <felix.noble@live.co.uk>
-Requires-Python: ==3.10.18
+Requires-Python: >=3.10
 Requires-Dist: tensorflow==2.10
 Requires-Dist: keras
 Requires-Dist: keras_tuner

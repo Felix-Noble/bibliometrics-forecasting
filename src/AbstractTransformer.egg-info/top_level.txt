@@ -1,5 +1,8 @@
-cache
+keras_test
 load_data
+load_test
+load_test2
+logs
 model_builder
 train
 tune
