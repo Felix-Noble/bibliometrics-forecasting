@@ -1,6 +1,8 @@
 #src/fit.py
 from src.utils.load_config import get_model_config, get_log_config, get_data_config, get_train_config
 from src.utils.setup_logging import setup_logger
+from src.load_data import create_tf_dataset
+from sklearn.metrics import balanced_accuracy_score, precision_recall_curve, precision_score, recall_score
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -135,10 +137,10 @@ def main():
         )
         return model
 
-
     start_year_int = start_year.value
     test_size_int = test_size.value
     val_size_int = val_size.value
+    tune = True
     logger.info(f"{start_year_int} | {test_size_int} | {val_size_int}")
     for current_slice_end_year in range(first_slice_end_year, end_year, CV_delta):
         previous_slice_end_year = start_year # reset prev slice value for entire dataset load every time
@@ -148,7 +150,7 @@ def main():
             objective="val_accuracy",
             max_trials=25,
             num_initial_points=7,
-            executions_per_trial=2,
+            executions_per_trial=1,
             overwrite=True,
             directory=f"./results_dir/{start_year.year}-{current_slice_end_year}",
             project_name=model_config["model_name"],
@@ -172,7 +174,7 @@ def main():
         test_start: int = pd.to_datetime(f"{current_slice_end_year}", format="%Y").value - test_size_int
         val_start: int = test_start - val_size_int
 
-        N_REFS = 10
+        N_REF = 10
         N_OUT = 1
         y_cols = ["higher_than_median_year"]
         sort_col = "publication_date_int"       
@@ -187,20 +189,22 @@ def main():
         train = create_tf_dataset(db_dir=db_dir, year=start_year_int, end_year=val_start, sort_col=sort_col, n_back=N_REF, n_features=n_embeddings, step_name="train")
 
         logger.info("Starting search...")
-        tuner.search(train, epochs=100, validation_data=val, callbacks=[early_stop_val, early_stop_best])
-        models = tuner.get_best_models(num_models=2)
-        best_model = models[0]
-        best_model.summary()
-        
-        logger.info("Hyperparameter search complete. Starting final training process.")
-
+        if tune:
+            tuner.search(train, epochs=100, validation_data=val, callbacks=[early_stop_val, early_stop_best])
+            models = tuner.get_best_models(num_models=1)
+            best_model = models[0]
+            best_model.summary()
+            best_model.save(f"./data/{model_name}-best_model.h5")
+            logger.info("Hyperparameter search complete. Starting final training process.")
+        else:
+            best_model = tf.keras.models.load_model(f"./data/{model_name}-best_model.h5")
+    
         # 1. Get the best hyperparameters found by the tuner.
-        best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
-        logger.info(f"Best hyperparameters: {best_hps.values}")
-
+        #best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+        #logger.info(f"Best hyperparameters: {best_hps.values}")
         # 2. Build a fresh instance of the model with these best hyperparameters.
-        final_model = tuner.hypermodel.build(best_hps)
-        logger.info("Built best model for final training.")
+        #final_model = tuner.hypermodel.build(best_hps)
+        #logger.info("Built best model for final training.")
 
         # 3. Create a new EarlyStopping callback for the final training phase.
         #    It will stop training when validation loss no longer improves and
@@ -217,7 +221,7 @@ def main():
 
         # 4. Retrain the model on the full training data.
         #    Set a high number of epochs; EarlyStopping will find the optimal number automatically.
-        final_model.fit(
+        best_model.fit(
             train,
             epochs=100,  # Set a high number; EarlyStopping will handle stopping it.
             validation_data=val,
@@ -226,62 +230,23 @@ def main():
 
         logger.info("Final training complete.")
 
-        # 5. Create the unseen test dataset.
-        logger.info("Creating the test dataset for final evaluation...")
-
         test = create_tf_dataset(db_dir=db_dir, year=test_start, end_year=test_start + test_size_int, sort_col=sort_col, n_back=N_REF, n_features=n_embeddings, step_name="test")
         # 6. Evaluate the final, best model on the test set.
         logger.info("Evaluating final model on the test set...")
         test_loss, test_accuracy = final_model.evaluate(test)
 
         # 7. Store and print the result.
+        y_pred_prob = best_model.predict(test)
+        y_true = np.concatenate([y for x, y in test], axis=0)
+        y_pred = np.argmax(y_pred_prob, axis=1)
+        
+
         logger.info(f"Accuracy on the unseen test set: {test_accuracy:.4f}")    
-        pd.DataFrame([[test_loss, test_accuracy]], columns=["loss", "accuracy"]).to_csv(f"./test_results_dir/{start_year.year}-{current_slice_end_year}.csv")
-    # best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
 
-    # # Start a new MLflow run to store the final, best model and its full history.
-    # with mlflow.start_run(run_name="Best_Model_Training"):
-
-#     # Log the best hyperparameters
-#     mlflow.log_params(best_hps.values)
-#     print(f"Logged Best Hyperparameters: {best_hps.values}")
-
-#     # Build the model with the best hyperparameters
-#     best_model = tuner.hypermodel.build(best_hps)
-
-#     # Retrain the model on the full dataset to get final training history
-#     history = best_model.fit(
-#         x_train, y_train,
-#         epochs=50, # Use the desired number of epochs for the final model
-#         validation_split=0.2
-#     )
-
-#     # Log the full training history (metrics per epoch)
-#     for epoch in range(len(history.history['loss'])):
-#         metrics_to_log = {
-#             'train_loss': history.history['loss'][epoch],
-#             'train_accuracy': history.history['accuracy'][epoch],
-#             'val_loss': history.history['val_loss'][epoch],
-#             'val_accuracy': history.history['val_accuracy'][epoch]
-#         }
-#         mlflow.log_metrics(metrics_to_log, step=epoch)
-
-#     print("Logged full training history for the best model.")
-
-#     # Log the final model to MLflow
-#     mlflow.keras.log_model(best_model, "best-model")
-#     print("Best model has been logged to MLflow.")
-
-#     # You can also log other artifacts, like a summary of the best model
-#     summary_path = "best_model_summary.txt"
-#     with open(summary_path, "w") as f:
-#         best_model.summary(print_fn=lambda x: f.write(x + '\n'))
-#     mlflow.log_artifact(summary_path)
-#     print(f"Logged model summary to {summary_path}.")
-
-# print("\nMLflow logging complete. Check the MLflow UI for results.")
-# 
-# tuner.search_space_summary()
+        metrics = pd.DataFrame(
+        [[test_loss, test_accuracy, balanced_accuracy_score(y_true, y_pred), precision_recall_curve(y_true, y_pred), recall_score(y_true, y_pred), precision_recall_curve(y_true, y_pred)]], 
+columns=["loss", "accuracy", "balanced_accuracy", "precision", "recall", "precision_recall_curve"])
+        metrics.to_csv(f"./test_results_dir/{current_slice_end_year - train_config["test_size"]}-{current_slice_end_year}.csv")
 
 if __name__ == "__main__":
     # main()

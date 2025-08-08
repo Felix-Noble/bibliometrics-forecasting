@@ -10,6 +10,7 @@ tf_cache/
 txt.txt
 emergency_csv.csv
 __pycache__*/
+*egg/
  emergency_csv.csv/
 mlruns/
 src/__pycache__/tune.cpython-313.pyc
