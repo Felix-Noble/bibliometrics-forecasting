@@ -1,34 +1,19 @@
 #src/fit.py
-from functools import cache
-import os
-from os import wait
 from src.utils.load_config import get_model_config, get_log_config, get_data_config, get_train_config
 from src.utils.setup_logging import setup_logger
 from pathlib import Path
 import pandas as pd
 import numpy as np
 import psutil
-# import dask
-import pyarrow.compute as pc
-import pyarrow.parquet as pq 
-import pyarrow as pa
-
-import ast
-import time
 import logging
-import duckdb
 import keras
 import keras_tuner
 import keras.layers as k_layers
 import keras.regularizers as k_reg
 import tensorflow as tf
-import gc
-# temp #
 
-shuffle_logger = logging.getLogger("distributed.shuffle._scheduler_plugin")
-# Set its level to ERROR to suppress warnings
-shuffle_logger.setLevel(logging.ERROR)
-# dask.config.set({'logging': {'distributed': logging.ERROR}})
+logger = logging.getLogger(Path(__file__).stem)
+
 class StopIfUnpromisingTrial(tf.keras.callbacks.Callback):
     """
     A custom Keras callback to stop a trial early if it's not beating the
@@ -76,145 +61,6 @@ class StopIfUnpromisingTrial(tf.keras.callbacks.Callback):
             self.model.stop_training = True
 
 
-def replace_ref_works(string_val):
-    temp = ast.literal_eval(string_val)
-    return [int(x.replace("https://openalex.org/W", "")) for x in temp]
-
-def make_id_index_map(db_loc:str, id_col:str = "id_OpenAlex"):
-    database = pq.ParquetDataset(db_loc)
-    id_table = database.read(columns=[id_col])
-    id_index_map = {int(id_val.as_py()): i for i, id_val in enumerate(id_table[id_col])}
-    return id_index_map
-def group_generator_pivot(db_dir: Path, main_df, id_index_map:dict, label_map:dict, n_back: int, feature_cols:list, batch_size:int =1024):
-    main_db = pq.read_table(db_dir, memory_map=True)
-    col_lookup_table = main_db.select(["id_OpenAlex"] + feature_cols) 
-    all_ids = main_df['id_OpenAlex'].unique()
-    logger.info(f"{all_ids.shape[0]} examples in split")
-    for i in range(0, all_ids.shape[0], batch_size):
-        batch_ids = all_ids[i:i + batch_size]
-        df = main_df[main_df['id_OpenAlex'].isin(batch_ids)].copy() # Use .copy() to avoid SettingWithCopyWarning
-        
-        # 5. Rank references within each group and keep the top N
-        df['ref_rank'] = df.groupby('id_OpenAlex').cumcount()
-        df = df[df['ref_rank'] < n_back]
-        ref_indicies = [id_index_map.get(id) for id in df["referenced_works_OpenAlex"]] 
-        embeddings_ref = pc.take(col_lookup_table, pa.array(ref_indicies, type=pa.int64())).to_pandas()
-        
-        df = df.merge(embeddings_ref, on="id_OpenAlex", how="inner")
-        
-        #del embeddings_ref, ref_indicies
-        
-        features_df = df.pivot_table(
-                index='id_OpenAlex',
-                columns='ref_rank',
-                values=feature_cols
-            ).dropna()
-            # Flatten the multi-level column index
-        features_df.columns = [f'{col[0]}_{col[1]}' for col in features_df.columns]
-        
-        features_df = features_df[[f"embedding_{x}_{y}" for y in range(n_back) for x in range(len(feature_cols))]]
-        self_indicies = [id_index_map.get(id) for id in features_df.index]
-        self_embeddings = pc.take(col_lookup_table, pa.array(self_indicies, type=pa.int64())).to_pandas()
-        
-        # 7. Add embeddings for the source paper itself
-        final_df = features_df.merge(
-            self_embeddings,
-            left_on="id_OpenAlex",
-            right_index=True,
-            how='inner',
-            suffixes=('_ref', '_source')
-        )
-        yield (final_df.values, np.array([label_map.get(id) for id in final_df.index]))
-    
-def group_generator(db_dir: Path, df, id_index_map:dict, label_map:dict, n_back: int, feature_cols:list): 
-    main_db = pq.read_table(db_dir, memory_map=True)
-    col_lookup_table = main_db.select(feature_cols) 
-    
-    for group_id, group_df in df: 
-        t1 = time.time()
-        ref_works_icol = group_df.columns.get_loc("referenced_works_OpenAlex")
-        indicies = [id_index_map.get(int(id)) for id in group_df.iloc[-n_back:, ref_works_icol]] + [id_index_map.get(group_id)]
-        if not indicies:
-            logger.error(f"No valid indicies found for id : {group_id}")
-        embeddings = pc.take(col_lookup_table, pa.array(indicies, type=pa.int64())).to_pandas()
- 
-        embeddings = embeddings.values.reshape(-1,)
-       # if np.isnan(embeddings).any() or np.isinf(embeddings).any():
-       #     raise ValueError("Embedddings contain NaN or Inf") 
-        yield (np.concatenate([embeddings], dtype=np.float32), label_map.get(group_id, -1))
-
-def create_tf_dataset(batch_size, year, end_year, available_ids, id_index_map, db_files, sort_col, n_back, n_features=384, cache_dir = "./tf_cache/", step_name = None):
-    cache_name = f"{step_name}{str(year)}-{str(end_year)}"
-    output_signature = (
-        tf.TensorSpec(shape=(None,(n_back+1) * n_features), dtype=tf.float32),
-        tf.TensorSpec(shape=(None,), dtype=tf.int32),
-    )
-
-    if step_name is None:
-        raise ValueError("Must give step name")
-    if not list((Path(cache_dir).glob(f"{cache_name}*"))):
-        logger.info(f"Cache not found for {step_name}, generating data")
-        df = duckdb.sql(f"""SELECT id_OpenAlex, publication_date_int, referenced_works_OpenAlex 
-        FROM read_parquet({db_files}) 
-        WHERE publication_date_int >= {year} AND publication_date_int < {end_year}""").df()
-
-        df = df.sort_values(sort_col, ascending=True)
-
-        df["referenced_works_OpenAlex"] = df["referenced_works_OpenAlex"].apply(replace_ref_works)
-        available_ids.columns = ["referenced_works_OpenAlex"] 
-        df = df.explode("referenced_works_OpenAlex")
-        df = df.merge(available_ids, on="referenced_works_OpenAlex", how="inner")
-        
-       # df = df.groupby("id_OpenAlex")
-        embedding_cols = [f"embedding_{x}" for x in range(n_features)]
-        y_df = duckdb.sql(f"""
-        SELECT id_OpenAlex, higher_than_median_year 
-        FROM read_parquet({db_files}) 
-        WHERE publication_date_int >= {year} AND publication_date_int < {end_year}
-        """).df()
-        label_map = pd.Series(y_df.higher_than_median_year.values, index=y_df.id_OpenAlex).to_dict()
-        del y_df
-
-        dataset = tf.data.Dataset.from_generator(
-        lambda : group_generator_pivot(Path(db_files[0]).parent, df, id_index_map, label_map, n_back, embedding_cols, batch_size=(1024*2)),
-            output_signature=output_signature,
-        )
-        """
-        dataset = dataset.padded_batch(
-            batch_size,
-            padded_shapes=(
-            ((n_back+1) * n_features),       # Shape for 1D feature vector (pad the variable dimension)
-            (),          # Shape for scalar label (it's empty)
-            ),
-            padding_values=(
-            tf.constant(0, dtype=tf.float32),
-            tf.constant(0, dtype=tf.int32), 
-            )
-        )
-        """
-        
-        dataset = dataset.cache(os.path.join(cache_dir, cache_name))
-        for _ in dataset:
-            pass
-
-        logger.info(f"Dataset {step_name} cached")
-
-    else:
-        dataset = tf.data.Dataset.from_generator(
-        lambda : None,
-            output_signature=output_signature
-        )
-        dataset = dataset.cache(os.path.join(cache_dir, cache_name))
-        
-        logger.info(f"Dataset {step_name} loaded")
-
-    dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)
-   
-    return dataset        
-
-
-logger = logging.getLogger(Path(__file__).stem)
-
 def main():
     setup_logger(logger, get_log_config())
     gpus = tf.config.list_physical_devices()
@@ -234,18 +80,13 @@ def main():
     n_output = 2
     tf.random.set_seed(2025)
 
-    database_loc = data_config["database_loc"]
+    db_dir = data_config["database_loc"]
 
     start_year = train_config["start_year"]
     end_year = train_config["end_year"]
     CV_delta = train_config["CV_delta"]
     val_size = train_config["val_size"]
     test_size = train_config["test_size"]
-
-    import os
-    database_files = [str(x) for x in Path(database_loc).glob("*.parquet")]
-    available_ids = duckdb.sql(f"SELECT id_OpenAlex FROM read_parquet({database_files})").df()
-    id_index_map = make_id_index_map(database_loc, "id_OpenAlex")
 
     first_slice_end_year = start_year + train_config["start_train_size"] + val_size + test_size
 
@@ -265,7 +106,7 @@ def main():
         x = k_layers.Reshape((N_REF+1, n_embeddings))(inputs)
         for i in range(hp.Int("conv_layers", 1, 3, step=1, default=1)):
             x = k_layers.Conv1D (
-                filters = hp.Int("filters_" + str(i), 16, 64, step=16, default=16),
+                filters = hp.Int("filters_" + str(i), 8, 64, step=8, default=16),
                 kernel_size = hp.Int("kernel_size_" + str(i), n_embeddings*2, (N_REF)*n_embeddings, step=n_embeddings),
                 
                 padding = "same",
@@ -342,8 +183,8 @@ def main():
         batch_size = available // example_size
         logger.info(f"Processing examples of size {example_size / (1024 * 1024)} MB in {batch_size} sized batches")
 
-        val = create_tf_dataset(batch_size, val_start, test_start, available_ids, id_index_map, database_files, sort_col, N_REF, n_embeddings, step_name="val")
-        train = create_tf_dataset(batch_size, start_year_int, val_start, available_ids, id_index_map, database_files, sort_col, N_REF, n_embeddings, step_name="train")
+        val = create_tf_dataset(db_dir=db_dir, year=val_start, end_year=test_start, sort_col=sort_col, n_back=N_REF, n_features=n_embeddings, step_name="val")
+        train = create_tf_dataset(db_dir=db_dir, year=start_year_int, end_year=val_start, sort_col=sort_col, n_back=N_REF, n_features=n_embeddings, step_name="train")
 
         logger.info("Starting search...")
         tuner.search(train, epochs=100, validation_data=val, callbacks=[early_stop_val, early_stop_best])
@@ -388,7 +229,7 @@ def main():
         # 5. Create the unseen test dataset.
         logger.info("Creating the test dataset for final evaluation...")
 
-        test = create_tf_dataset(batch_size, test_start, test_start + test_size_int, available_ids, id_index_map, database_files, sort_col, N_REF, n_embeddings, step_name="test")
+        test = create_tf_dataset(db_dir=db_dir, year=test_start, end_year=test_start + test_size_int, sort_col=sort_col, n_back=N_REF, n_features=n_embeddings, step_name="test")
         # 6. Evaluate the final, best model on the test set.
         logger.info("Evaluating final model on the test set...")
         test_loss, test_accuracy = final_model.evaluate(test)
