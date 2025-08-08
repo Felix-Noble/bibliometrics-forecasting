@@ -1,4 +1,4 @@
-#src/fit.py
+#src/tune.py
 from src.utils.load_config import get_model_config, get_log_config, get_data_config, get_train_config
 from src.utils.setup_logging import setup_logger
 from src.load_data import create_tf_dataset
@@ -76,8 +76,11 @@ def main():
     train_config = get_train_config()
 
     n_embeddings = data_config["Nembeddings"]
+    model_name = model_config["model_name"]
     embedding_cols = [f"embedding_{x}" for x in range(n_embeddings)]
-    N_REF = 5
+    N_REF = 10
+    y_cols = ["higher_than_median_year"]
+    sort_col = "publication_date_int"
     n_input = n_embeddings * (N_REF + 1)
     n_output = 2
     tf.random.set_seed(2025)
@@ -140,7 +143,7 @@ def main():
     start_year_int = start_year.value
     test_size_int = test_size.value
     val_size_int = val_size.value
-    tune = True
+    tuner_search = True
     logger.info(f"{start_year_int} | {test_size_int} | {val_size_int}")
     for current_slice_end_year in range(first_slice_end_year, end_year, CV_delta):
         previous_slice_end_year = start_year # reset prev slice value for entire dataset load every time
@@ -153,7 +156,7 @@ def main():
             executions_per_trial=1,
             overwrite=True,
             directory=f"./results_dir/{start_year.year}-{current_slice_end_year}",
-            project_name=model_config["model_name"],
+            project_name=model_name,
         )
         early_stop_val = keras.callbacks.EarlyStopping(
             monitor='val_accuracy',
@@ -174,10 +177,7 @@ def main():
         test_start: int = pd.to_datetime(f"{current_slice_end_year}", format="%Y").value - test_size_int
         val_start: int = test_start - val_size_int
 
-        N_REF = 10
-        N_OUT = 1
-        y_cols = ["higher_than_median_year"]
-        sort_col = "publication_date_int"       
+              
         mem = psutil.virtual_memory()
         available = mem.available
         available = 4500 * (1024 * 1024)
@@ -189,15 +189,16 @@ def main():
         train = create_tf_dataset(db_dir=db_dir, year=start_year_int, end_year=val_start, sort_col=sort_col, n_back=N_REF, n_features=n_embeddings, step_name="train")
 
         logger.info("Starting search...")
-        if tune:
+        if tuner_search:
             tuner.search(train, epochs=100, validation_data=val, callbacks=[early_stop_val, early_stop_best])
             models = tuner.get_best_models(num_models=1)
-            best_model = models[0]
+            best_model: tf.keras.Model = models[0]
             best_model.summary()
             best_model.save(f"./data/{model_name}-best_model.h5")
             logger.info("Hyperparameter search complete. Starting final training process.")
+            tuner_search = False
         else:
-            best_model = tf.keras.models.load_model(f"./data/{model_name}-best_model.h5")
+            best_model: tf.keras.Model = tf.keras.models.load_model(f"./data/{model_name}-best_model.h5")
     
         # 1. Get the best hyperparameters found by the tuner.
         #best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
@@ -209,7 +210,7 @@ def main():
         # 3. Create a new EarlyStopping callback for the final training phase.
         #    It will stop training when validation loss no longer improves and
         #    crucially, restore the model weights from the best epoch.
-        final_training_callback = keras.callbacks.EarlyStopping(
+        final_training_callback = tf.keras.callbacks.EarlyStopping(
             monitor='val_accuracy',         # Monitor loss on the validation set
             patience=5,                 # Stop if val_loss doesn't improve for 5 epochs
             verbose=1,
@@ -233,7 +234,7 @@ def main():
         test = create_tf_dataset(db_dir=db_dir, year=test_start, end_year=test_start + test_size_int, sort_col=sort_col, n_back=N_REF, n_features=n_embeddings, step_name="test")
         # 6. Evaluate the final, best model on the test set.
         logger.info("Evaluating final model on the test set...")
-        test_loss, test_accuracy = final_model.evaluate(test)
+        test_loss, test_accuracy = best_model.evaluate(test)
 
         # 7. Store and print the result.
         y_pred_prob = best_model.predict(test)
