@@ -4,10 +4,12 @@ config/
 build/
 cache/
 test/
-
+results_dir/
+test_results_dir/
+tf_cache/
 txt.txt
 emergency_csv.csv
-__pycache__/
+__pycache__*/
  emergency_csv.csv/
 mlruns/
 src/__pycache__/tune.cpython-313.pyc
