@@ -23,15 +23,15 @@ The **training component** focuses on building predictive models that leverage *
 
 ```mermaid
 flowchart LR
-    A[Integrated Feature Dataset<br>(Parquet)] --> B[Data Loader<br>(load_data.py)]
-    B --> C[Feature Construction - Time Series of referenced embeddings]
-    C --> D[TensorFlow Dataset Pipeline<br>(Streaming + Caching)]
-    D --> E[Model Definition<br>(Conv1D + Dense)]
-    E --> F[Hyperparameter Optimization<br>(Keras Tuner - Bayesian Search)]
+    A[Integrated Feature Dataset\n(Parquet)] --> B[Data Loader\n(load_data.py)]
+    B --> C[Feature Construction\nTime Series of Referenced Embeddings]
+    C --> D[TensorFlow Dataset Pipeline\n(Streaming + Caching)]
+    D --> E[Model Definition\n(Conv1D + Dense)]
+    E --> F[Hyperparameter Optimization\n(Keras Tuner - Bayesian Search)]
     F --> G[Early Stopping & Trial Pruning]
     G --> H[Final Model Training]
-    H --> I[Evaluation<br>(Temporal Cross-Validation)]
-    I --> J[Metrics & Model Artifacts<br>(.h5, CSV)]
+    H --> I[Evaluation\n(Temporal Cross-Validation)]
+    I --> J[Metrics & Model Artifacts\n(.h5, CSV)]
 ```
 
 **Key Design Principles:**
