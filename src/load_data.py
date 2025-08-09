@@ -52,6 +52,10 @@ def group_generator_pivot(db_dir: Path, main_df, id_index_map:dict, label_map:di
                 values=feature_cols
             ).dropna()
             # Flatten the multi-level column index
+        logger.debug(f"Features df shape: {features_df.shape}")
+
+        if features_df.shape[0] < 1:
+            continue
         features_df.columns = [f'{col[0]}_{col[1]}' for col in features_df.columns]
         
         features_df = features_df[[f"embedding_{x}_{y}" for y in range(n_back) for x in range(len(feature_cols))]]
@@ -100,7 +104,7 @@ def create_tf_dataset(db_dir, year, end_year, sort_col, n_back, n_features=384, 
         raise ValueError("Must give step name")
     if not list((Path(cache_dir).glob(f"{cache_name}*"))):
         logger.info(f"Cache not found for {step_name}, generating data")
-        db_files = [str(x) for x in Path(db_dir).glob("*.parquet")]
+        db_files = [str(x) for x in db_dir.glob("*.parquet")]
         available_ids = duckdb.sql(f"SELECT id_OpenAlex FROM read_parquet({db_files})").df()
         id_index_map = make_id_index_map(db_dir, "id_OpenAlex")
 
@@ -126,7 +130,7 @@ def create_tf_dataset(db_dir, year, end_year, sort_col, n_back, n_features=384, 
         del y_df
 
         dataset = tf.data.Dataset.from_generator(
-        lambda : group_generator_pivot(Path(db_files[0]).parent, df, id_index_map, label_map, n_back, embedding_cols, batch_size=(1024*2)),
+        lambda : group_generator_pivot(db_dir=Path(db_files[0]).parent, main_df=df, id_index_map=id_index_map, label_map=label_map, n_back=n_back, feature_cols=embedding_cols, batch_size=512),
             output_signature=output_signature,
         )
         """
@@ -144,8 +148,10 @@ def create_tf_dataset(db_dir, year, end_year, sort_col, n_back, n_features=384, 
         """
         
         dataset = dataset.cache(os.path.join(cache_dir, cache_name))
-        for _ in dataset:
-            pass
+        total_examples = 0
+        for x, y in dataset:
+            total_examples += x.shape[0]
+        logger.info(f"Total Examples: {total_examples}")
 
         logger.info(f"Dataset {step_name} cached")
 

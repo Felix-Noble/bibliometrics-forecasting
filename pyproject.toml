@@ -15,9 +15,8 @@ dependencies = [
 "pandas",
 "toml",
 "dask",
-"dask_sql",
-"dask_expr",
 "pyarrow",
+"duckdb"
 ]
 
 [build-system]

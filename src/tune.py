@@ -78,7 +78,9 @@ def main():
     n_embeddings = data_config["Nembeddings"]
     model_name = model_config["model_name"]
     embedding_cols = [f"embedding_{x}" for x in range(n_embeddings)]
-    N_REF = 10
+    N_REF = 5
+    max_trials = 50
+    ratio_initial_points = 0.25
     y_cols = ["higher_than_median_year"]
     sort_col = "publication_date_int"
     n_input = n_embeddings * (N_REF + 1)
@@ -105,11 +107,11 @@ def main():
     def build_model(hp):
         l2_regularization = hp.Float('l2_regularization', min_value=1e-5, max_value=1e-2, sampling='log')
         learning_rate = hp.Float('learning_rate', min_value=1e-5, max_value=1e-2, sampling='log')
-        decay_rate = hp.Choice('exp_decay_rate', values=[1.0])
+        decay_rate = hp.Float('exp_decay_rate', min_value = 0.5, max_value = 1, sampling="linear")
 
         inputs = k_layers.Input(shape=(n_input))
         x = k_layers.Reshape((N_REF+1, n_embeddings))(inputs)
-        for i in range(hp.Int("conv_layers", 1, 3, step=1, default=1)):
+        for i in range(hp.Choice("conv_layers", values=[1,3])):
             x = k_layers.Conv1D (
                 filters = hp.Int("filters_" + str(i), 8, 64, step=8, default=16),
                 kernel_size = hp.Int("kernel_size_" + str(i), n_embeddings*2, (N_REF)*n_embeddings, step=n_embeddings),
@@ -151,9 +153,9 @@ def main():
         tuner = keras_tuner.BayesianOptimization(
             hypermodel=build_model,
             objective="val_accuracy",
-            max_trials=25,
-            num_initial_points=7,
-            executions_per_trial=1,
+            max_trials=max_trials,
+            num_initial_points=max_trials // ratio_initial_points,
+            executions_per_trial=2,
             overwrite=True,
             directory=f"./results_dir/{start_year.year}-{current_slice_end_year}",
             project_name=model_name,
@@ -176,7 +178,6 @@ def main():
         less_than = pd.to_datetime(current_slice_end_year, format="%Y").value
         test_start: int = pd.to_datetime(f"{current_slice_end_year}", format="%Y").value - test_size_int
         val_start: int = test_start - val_size_int
-
               
         mem = psutil.virtual_memory()
         available = mem.available
@@ -246,9 +247,10 @@ def main():
 
         metrics = pd.DataFrame(
         [[test_loss, test_accuracy, balanced_accuracy_score(y_true, y_pred), precision_recall_curve(y_true, y_pred), recall_score(y_true, y_pred), precision_recall_curve(y_true, y_pred)]], 
-columns=["loss", "accuracy", "balanced_accuracy", "precision", "recall", "precision_recall_curve"])
-        metrics.to_csv(f"./test_results_dir/{current_slice_end_year - train_config["test_size"]}-{current_slice_end_year}.csv")
-
+columns=["loss", "accuracy", "balanced_accuracy", "precision", "recall", "precision_recall_curve"]
+        )
+        metrics.to_csv(f"./test_results_dir/{current_slice_end_year - train_config['test_size']}-{current_slice_end_year}.csv")
+        print(metrics)
 if __name__ == "__main__":
     # main()
     pass

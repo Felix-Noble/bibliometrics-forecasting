@@ -3,12 +3,14 @@ import logging
 import os
 import sys
 from pathlib import Path
-
 def setup_logger(logger: logging.Logger, config: dict = {"file": "INFO",
                                                        "console": "ERROR"}):
     
     if not os.path.exists(Path(os.getcwd()) / "logs"):
         os.makedirs(Path(os.getcwd()) / "logs")
+
+    if getattr(logger, '_has_been_configured', False):
+        return
     
     level_console = config["console"]
     level_file = config["file"]
@@ -28,5 +30,7 @@ def setup_logger(logger: logging.Logger, config: dict = {"file": "INFO",
 
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
+    
+    setattr(logger, '_has_been_configured', True)
 
     return logger
