@@ -19,21 +19,6 @@ The **training component** focuses on building predictive models that leverage *
 
 ---
 
-## System Architecture
-
-```mermaid
-flowchart LR
-    A[Integrated Feature Dataset\n(Parquet)] --> B[Data Loader\n(load_data.py)]
-    B --> C[Feature Construction\nTime Series of Referenced Embeddings]
-    C --> D[TensorFlow Dataset Pipeline\n(Streaming + Caching)]
-    D --> E[Model Definition\n(Conv1D + Dense)]
-    E --> F[Hyperparameter Optimization\n(Keras Tuner - Bayesian Search)]
-    F --> G[Early Stopping & Trial Pruning]
-    G --> H[Final Model Training]
-    H --> I[Evaluation\n(Temporal Cross-Validation)]
-    I --> J[Metrics & Model Artifacts\n(.h5, CSV)]
-```
-
 **Key Design Principles:**
 - **Time-aware evaluation** to prevent future data leakage.
 - **Reference context modeling** to capture citation network influence.
