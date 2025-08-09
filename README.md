@@ -30,7 +30,7 @@ The **training component** focuses on building predictive models that leverage *
 ## Objectives
 - **Load and preprocess** high-dimensional embedding datasets for supervised learning.
 - **Construct temporal, reference-aware feature sets** to capture citation network context.
-- **Perform hyperparameter optimization** using Bayesian search.
+- **Perform hyperparameter optimization** using Bayesian search and early trial stopping.
 - **Evaluate models** under a **time-aware cross-validation** framework to ensure realistic generalization performance.
 - **Log and store** all results for reproducibility and portfolio presentation.
 
