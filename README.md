@@ -1,4 +1,4 @@
-# Bibliometrics: ML training, hyperparameter tuning, and walk forward cross validation
+# Bibliometrics: Forecasting impact
 
 ---
 
