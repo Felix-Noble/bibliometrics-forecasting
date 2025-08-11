@@ -8,7 +8,6 @@ import pandas as pd
 import numpy as np
 import psutil
 import logging
-import keras
 import keras_tuner
 import keras.layers as k_layers
 import keras.regularizers as k_reg
@@ -75,20 +74,21 @@ def main():
     model_config = get_model_config()
     train_config = get_train_config()
 
-    n_embeddings = data_config["Nembeddings"]
+    db_dir = data_config["database_loc"]
+    n_embeddings = data_config["n_embeddings"]
+
     model_name = model_config["model_name"]
-    embedding_cols = [f"embedding_{x}" for x in range(n_embeddings)]
-    N_REF = 5
-    max_trials = 50
-    ratio_initial_points = 0.25
-    y_cols = ["higher_than_median_year"]
+    #embedding_cols = [f"embedding_{x}" for x in range(n_embeddings)]
+    N_REF = model_config["n_references"]
+    
+    y_cols = ["higher_than_median_year"] # TODO incorporate y col selection into data streaming 
     sort_col = "publication_date_int"
     n_input = n_embeddings * (N_REF + 1)
     n_output = 2
     tf.random.set_seed(2025)
-
-    db_dir = data_config["database_loc"]
-
+   
+    max_trials = train_config["max_trials"]
+    ratio_initial_points = train_config["radio_initial_points"]
     start_year = train_config["start_year"]
     end_year = train_config["end_year"]
     CV_delta = train_config["CV_delta"]
@@ -103,7 +103,6 @@ def main():
 
     previous_slice_end_year = start_year
 
-    # keras_model = define_model(model_config)
     def build_model(hp):
         l2_regularization = hp.Float('l2_regularization', min_value=1e-5, max_value=1e-2, sampling='log')
         learning_rate = hp.Float('learning_rate', min_value=1e-5, max_value=1e-2, sampling='log')
@@ -126,7 +125,7 @@ def main():
         x = k_layers.Flatten()(x)
         outputs = k_layers.Dense(n_output, activation="softmax")(x)
 
-        model = keras.Model(inputs=inputs, outputs=outputs)
+        model = tf.keras.Model(inputs=inputs, outputs=outputs)
 
         lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
         initial_learning_rate=learning_rate,
@@ -135,7 +134,7 @@ def main():
         ) 
         optimizer_name = hp.Choice("optimizer", ["adam"])
         if optimizer_name == "adam":
-            optimizer = keras.optimizers.Adam(learning_rate=lr_schedule)
+            optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
         model.compile(
             optimizer, loss="sparse_categorical_crossentropy", metrics=["accuracy"]
@@ -160,7 +159,7 @@ def main():
             directory=f"./results_dir/{start_year.year}-{current_slice_end_year}",
             project_name=model_name,
         )
-        early_stop_val = keras.callbacks.EarlyStopping(
+        early_stop_val = tf.keras.callbacks.EarlyStopping(
             monitor='val_accuracy',
             patience=3,
             mode='max'
