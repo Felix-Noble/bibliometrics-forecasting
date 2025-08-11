@@ -1,0 +1,22 @@
+[data]
+database_loc = "~/data/abstracts_features/ACS"
+journal = "ACS"
+n_embeddings = 384
+
+[model  ]
+n_references = 5
+model_name = "conv_1DMLP"
+ 
+[train]
+val_size = 5
+test_size = 1
+start_train_size = 90
+CV_delta = 1
+start_year = 1900
+end_year = 2020
+max_trials = 50
+ratio_initial_points = 0.25
+
+[log]
+file = "ERROR"
+console = "INFO"
