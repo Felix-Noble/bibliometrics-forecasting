@@ -14,9 +14,8 @@ def build_cnn(
 
         decay_rate = hp.Float('exp_decay_rate', min_value = 0.5, max_value = 1, sampling="linear")
 
-        inputs = tf.keras.layers.Input(shape = input_shape)
-        #x = k_layers.Reshape((N_REF+1, n_embeddings))(inputs)
-        x = inputs
+        inputs = tf.keras.layers.Input(shape = input_shape[0] * input_shape[1])
+        x = tf.keras.layers.Reshape(input_shape)(inputs)
         for i in range(hp.Choice("conv_layers", values=[1])):
             x = tf.keras.layers.Conv1D (
                 filters = hp.Int("filters_" + str(i), 8, 64, step=8, default=16),
@@ -30,7 +29,7 @@ def build_cnn(
             x = tf.keras.layers.BatchNormalization()(x)
             x = tf.keras.layers.ReLU()(x)
         x = tf.keras.layers.Flatten()(x)
-        outputs = tf.keras.layers.Dense(n_output, activation="softmax")(x)
+        outputs = tf.keras.layers.Dense(1, activation="sigmoid")(x)
 
         model = tf.keras.Model(inputs=inputs, outputs=outputs)
 
@@ -44,7 +43,7 @@ def build_cnn(
             optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
         model.compile(
-            optimizer, loss="sparse_categorical_crossentropy", metrics=["accuracy"]
+            optimizer, loss="binary_crossentropy", metrics=["accuracy", tf.keras.metrics.Precision()]
         )
         return model
 

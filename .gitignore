@@ -21,5 +21,5 @@ src/utils/index_parquet.py
 test_df.csv
 tuner_test.py
 tuner_test/
-
-
+notes.txt
+*.egg-info/
