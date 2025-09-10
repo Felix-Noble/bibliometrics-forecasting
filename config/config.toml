@@ -8,7 +8,7 @@ journal = "ACS"
 n_features = 384
 feature_col_name = "embedding_"
 y_cols = ["higher_than_median_year"]
-max_timepoints = 50
+max_timepoints = 20
 pad_value = 0.0
 sort_col = "publication_date_int"
 [data.range_vals]
@@ -26,7 +26,7 @@ start_train_size = 90
 CV_delta = 1
 start_year = 1900
 end_year = 2020
-max_trials = 20
+max_trials = 15
 ratio_initial_points = 0.25
 patience = 2
 

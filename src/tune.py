@@ -1,8 +1,8 @@
 #src/tune.py
 from src.utils.load_config import get_model_config, get_log_config, get_data_config, get_train_config
 from src.utils.setup_logging import setup_logger
-from src.load_data import create_tf_dataset
 from src.models.registry import get_model
+from src.export_tf_dataset import tf_dataset_from_generator
 from sklearn.metrics import balanced_accuracy_score, precision_recall_curve, precision_score, recall_score
 from pathlib import Path
 import pandas as pd
@@ -133,15 +133,28 @@ def main():
         parsed = tf.io.parse_single_example(serialized_example, feature_description)
         return parsed["features"], parsed["target"]
 
-    def build_dataset(files, batch_size=128, shuffle=True):
+    def build_dataset_prev(files, batch_size=128, shuffle=True):
         ds = tf.data.TFRecordDataset(files, num_parallel_reads=tf.data.AUTOTUNE)
         ds = ds.map(parse_example, num_parallel_calls=tf.data.AUTOTUNE)
         if shuffle:
             ds = ds.shuffle(buffer_size=10_000)
         ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
         return ds
-
-   
+    def build_dataset(files, batch_size=128, shuffle=True):
+        dataset = (
+            tf.data.Dataset.from_tensor_slices(files)
+            .shuffle(len(files))  # shuffle file order for good mixing
+            .interleave(
+                lambda filename: tf.data.TFRecordDataset(filename),
+                cycle_length=8,  # how many files to read from in parallel
+                num_parallel_calls=tf.data.AUTOTUNE
+            )
+            .map(parse_example, num_parallel_calls=tf.data.AUTOTUNE)
+            .batch(batch_size)  # or your batch size
+            .prefetch(tf.data.AUTOTUNE)
+        )
+        return dataset
+       
     tuner_search = True
     for current_slice_end_year in range(first_slice_end_year, end_year, CV_delta):
         previous_slice_end_year = start_year # reset prev slice value for entire dataset load every time
@@ -158,11 +171,17 @@ def main():
         train_files = select_files(tf_dir, start_year_int, val_start)
         val_files = select_files(tf_dir, val_start, test_start)
 
-        train_ds = build_dataset(train_files, batch_size = batch_size)
-        val_ds = build_dataset(val_files, batch_size = batch_size)
+        #train_ds = build_dataset(train_files, batch_size = batch_size)
+        #val_ds = build_dataset(val_files, batch_size = batch_size)
+        train_ds = tf_dataset_from_generator(start_year_int, val_start)
+        val_ds = tf_dataset_from_generator(val_start, test_start)
+        test_ds = tf_dataset_from_generator(test_start, test_start + test_size_int)
+
+        train_ds = train_ds.cache()
+        val_ds = val_ds.cache()
         with open(os.path.join(tf_dir, "metadata.json"), "r") as f:
             metadata = json.load(f)
-        n_train_examps = sum([metadata["./" + file] for file in train_files]) 
+        n_train_examps = sum([metadata["n_examples"]["./" + file] for file in train_files]) 
         n_train_examps = 90e3
         decay_steps = math.ceil(batch_size / n_train_examps)
 
@@ -174,7 +193,7 @@ def main():
                 objective=keras_tuner.Objective("val_precision", direction = "max"),
                 max_trials=max_trials,
                 num_initial_points=max_trials // ratio_initial_points,
-                executions_per_trial=2,
+                executions_per_trial=1,
                 overwrite=True,
                 directory=f"./results_dir/{start_year.year}-{current_slice_end_year}",
                 project_name=model_name,
@@ -186,10 +205,9 @@ def main():
             )
             early_stop_best = StopIfUnpromisingTrial(
                 tuner=tuner,
-                patience=15,
+                patience=5,
                 score_threshold_ratio=0.95,
             )
-
 
             logger.info("Starting search...")
             tuner.search(train_ds, epochs=100, validation_data=val_ds, callbacks=[early_stop_val, early_stop_best])
@@ -201,7 +219,6 @@ def main():
             tuner_search = False
         
         else:
-            #best_model: tf.keras.Model = tf.keras.models.load_model(f"./data/{model_name}-best_model.h5")
             hp = keras_tuner.HyperParameters()
             hp.Fixed("l2_regularisation", 0.0039705)
             hp.Fixed("learning_rate", 2.8242e-5)
@@ -211,7 +228,8 @@ def main():
             hp.Fixed("kernel_size_0", 768)
             hp.Fixed("optimizer", "adam")
             best_model = model_builder(hp) 
-            
+            best_model: tf.keras.Model = tf.keras.models.load_model(f"./data/{model_name}-best_model.h5")
+
         final_training_callback = tf.keras.callbacks.EarlyStopping(
             monitor='val_precision',      
             patience=5,                 
@@ -232,7 +250,7 @@ def main():
         logger.info("Final training complete.")
         
         test_files = select_files(tf_dir, test_start,test_start + test_size_int)
-        test_ds = build_dataset(test_files, batch_size = batch_size)
+       #test_ds = build_dataset(test_files, batch_size = batch_size)
 
         logger.info("Evaluating final model on the test set...")
         test_loss, test_accuracy = best_model.evaluate(test_ds)

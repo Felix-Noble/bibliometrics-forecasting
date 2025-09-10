@@ -1,4 +1,4 @@
-from src.data_stream.stream_parquet import DB_Pyarrow
+from src.stream_parquet import DB_Pyarrow
 from src.utils.setup_logging import setup_logger
 from src.utils.load_config import get_data_config, get_log_config
 import tensorflow as tf
@@ -37,7 +37,6 @@ def generate_parquet_timeseries(
     DB.batch_size = 1e6
     all_ids = DB.get_cols_all([id_col])
     all_ids_array = all_ids.to_table()[id_col]
-    logger.info(f"{len(all_ids_array)} Ids in Database")
 
     example_nbytes = (max_timepoints+1) * n_features * (feature_dtype().bit_width // 8) * 32
     referenced_works = DB.get_cols_range(cols = [id_col, "referenced_works_OpenAlex"],
@@ -73,10 +72,10 @@ def generate_parquet_timeseries(
         "referenced_works_" + sort_col: pc.take(sort_col_table[sort_col], ref_works_sort_col_i)
     })
     
-    batch_size = DB.get_batch_size(example_nbytes, verbose = 1)
+    batch_size = DB.get_batch_size(example_nbytes, verbose = 0)
     n_batches = math.ceil(source_ids_in_range.shape[0] / batch_size)
     for batch_i in range(n_batches):
-        DB.get_mem_use(verbose=1)
+        DB.get_mem_use(verbose = 0)
         batch_ids_table = source_ids_in_range.iloc[batch_i * batch_size : (batch_i+1) * batch_size]
         batch_ids_table = pa.Table.from_pandas(batch_ids_table.to_frame())
 
@@ -138,7 +137,7 @@ def generate_parquet_timeseries(
                                         )
         # Pad 
         examples_df = examples_df.fillna(pad_value)
-        yield examples_df
+        yield examples_df[[x for x in examples_df.columns if "embedding" in x]].values, examples_df[y_cols].values.reshape(-1, len(y_cols))
 
 def create_tfrecord_example(features: list, target: list):
     """Creates tf_record example with timestamp (int) serialised_features (float > bytearray) and targets (int)"""
@@ -150,7 +149,7 @@ def create_tfrecord_example(features: list, target: list):
     }
     return tf.train.Example(features = tf.train.Features(feature = feature))
 
-def save_tf_dataset(
+def process_tf_dataset(
     data_generator,
     t_min: int,
     t_max: int,
@@ -188,7 +187,7 @@ def save_tf_dataset(
         with open(metadata_file, "w") as f:
             json.dump(metadata, f)
 
-def main(data_config: dict = get_data_config()):
+def save_tf_dataset(data_config: dict = get_data_config()):
     if data_config["overwrite_tf_dataset"]:
         shutil.rmtree(data_config["tf_dataset_loc"])
 
@@ -203,11 +202,29 @@ def main(data_config: dict = get_data_config()):
         data_generator = generate_parquet_timeseries(val_start = val_start_int,
                                                      val_end = val_end_int)
 
-        save_tf_dataset(data_generator = data_generator,
+        process_tf_dataset(data_generator = data_generator,
                         t_min = val_start_int,
                         t_max = val_end_int,
                         )
-    
+
+def tf_dataset_from_generator(
+        val_start:int,
+        val_end: int,
+        data_config: dict = get_data_config()):
+    max_timepoints = data_config["max_timepoints"]
+    n_features = data_config["n_features"]
+    y_cols = data_config["y_cols"]
+
+    output_signature = (
+        tf.TensorSpec(shape = (None, (max_timepoints+1)*n_features), dtype = tf.float32),
+        tf.TensorSpec(shape = (None, len(y_cols)), dtype = tf.float32),
+    )
+    dataset = tf.data.Dataset.from_generator(
+        lambda: generate_parquet_timeseries(val_start, val_end),
+        output_signature = output_signature,
+    )
+    return dataset
+
 if __name__ == "__main__":
     main()
 
