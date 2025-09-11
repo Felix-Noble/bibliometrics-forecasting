@@ -8,7 +8,7 @@ journal = "ACS"
 n_features = 384
 feature_col_name = "embedding_"
 y_cols = ["higher_than_median_year"]
-max_timepoints = 20
+max_timepoints = 50
 pad_value = 0.0
 sort_col = "publication_date_int"
 [data.range_vals]
@@ -20,15 +20,16 @@ publication_date_int_delta = 1
 model_name = "cnn"
  
 [train]
+GRAM_MiB = 2000
 val_size = 5
 test_size = 1
-start_train_size = 90
+start_train_size = 100
 CV_delta = 1
 start_year = 1900
 end_year = 2020
-max_trials = 15
+max_trials = 50
 ratio_initial_points = 0.25
-patience = 2
+patience = 1
 
 [log]
 file = "ERROR"

@@ -225,6 +225,64 @@ def tf_dataset_from_generator(
     )
     return dataset
 
+def tf_dataset_from_slices(
+        val_start:int,
+        val_end: int,
+        data_config: dict = get_data_config()):
+    max_timepoints = data_config["max_timepoints"]
+    n_features = data_config["n_features"]
+    all_features, all_targets = [], []
+
+    for features, targets in generate_parquet_timeseries(val_start, val_end):
+        all_features.append(features)
+        all_targets.append(targets)
+    all_features = np.vstack(all_features).astype(np.float32)
+    all_targets = np.vstack(all_targets).astype(np.float32)
+    if not all_features:
+        raise ValueError("No data loaded")
+    dataset = tf.data.Dataset.from_tensor_slices(all_features, all_targets)
+    dataset = dataset.prefetch(50)
+    return dataset
+def build_optimized_tfrecord_dataset(files, parse_example, batch_size=256, num_parallel_calls=8):
+    """Highly optimized TFRecord reading"""
+    
+    if not files:
+        raise ValueError("No TFRecord files found")
+    
+    logger.info(f"Loading from {len(files)} TFRecord files")
+    
+    # Create dataset with proper parallelism
+    file_dataset = tf.data.Dataset.from_tensor_slices(files)
+    
+    # Interleave files with high parallelism
+    dataset = file_dataset.interleave(
+        lambda filename: tf.data.TFRecordDataset(
+            filename,
+            compression_type="",  # No compression for speed
+            buffer_size=8*1024*1024,  # 8MB buffer
+            num_parallel_reads=1
+        ),
+        cycle_length=min(len(files), num_parallel_calls),
+        block_length=16,  # Read 16 records from each file at a time
+        num_parallel_calls=tf.data.AUTOTUNE,
+        deterministic=False  # Allow reordering for performance
+    )
+    
+    # Parse with high parallelism
+    dataset = dataset.map(
+        parse_example,
+        num_parallel_calls=tf.data.AUTOTUNE,
+        deterministic=False
+    )
+    
+    # Large shuffle buffer
+    # Batch
+    dataset = dataset.batch(batch_size, drop_remainder=True)
+    
+    # CRITICAL: Aggressive prefetching
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)  # Prefetch many batches
+    
+    return dataset
 if __name__ == "__main__":
     main()
 

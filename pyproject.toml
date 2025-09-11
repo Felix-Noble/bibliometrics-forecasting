@@ -1,22 +1,21 @@
 [project]
 name = "AbstractTransformer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Analyse word embeddings over time "
 authors = [
     {name="Felix Noble", email="felix.noble@live.co.uk"}
     ]
-requires-python = ">=3.10"
+requires-python = "==3.10"
 
 dependencies = [
-"tensorflow==2.10",
-"keras",
-"keras_tuner",
+"tensorflow-gpu==2.10",
+"keras_tuner==1.4.7",
 "numpy==1.26",
-"pandas",
-"toml",
-"dask",
-"pyarrow",
-"duckdb"
+"pandas==2.3.2",
+"toml==0.10.2",
+"pyarrow==21.0.0",
+"psutil==7.0.0",
+"scikit-learn==1.7.1",
 ]
 
 [build-system]
